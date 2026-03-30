@@ -65,7 +65,7 @@ void init_linemem() {
 }
 
 size_t allocate_line(const char *line) {
-    if (next_free_line > MEM_SIZE) {
+    if (next_free_line >= MEM_SIZE) {
         // out of memory!
         return (size_t)(-1);
     }

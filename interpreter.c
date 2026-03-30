@@ -540,26 +540,33 @@ int my_exec(char *args[], int args_size, bool MT) {
 
 
     for (int n = 0; n < args_size; ++n) {
-        struct PCB *pcb = create_process(args[n]);
+        struct PCB *pcb = NULL;
+
+        struct PCB *existing = find_pcb_by_name(q, args[n]);
+
+        if (existing) {
+            pcb = create_process_from_image(existing->image);
+        } else {
+            pcb = create_process(args[n]);
+        }
+
         if (!pcb) {
             printf("Failed to create process\n");
             goto cleanup;
         }
-        // once threads exist, need to use mutex
-        if (threads_created){
+
+        if (threads_created) {
             pthread_mutex_lock(&q_mutex);
             policy->enqueue(q, pcb);
-            pthread_cond_signal(&q_cond); // Wake up a worker
+            pthread_cond_signal(&q_cond);
             pthread_mutex_unlock(&q_mutex);
-        }
-        else{
+        } else {
             policy->enqueue(q, pcb);
         }
-        
     }
 
     if (background && !background_exec) {
-        struct PCB *pcb = create_process_from_FILE(stdin); // cheat to read until EOF char
+        struct PCB *pcb = create_process_from_FILE(stdin, "__stdin__"); // cheat to read until EOF char
         if (!pcb) {
             printf("Failed to create STDIN process\n");
             goto cleanup;

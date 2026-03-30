@@ -29,7 +29,7 @@ void free_queue(struct queue *q) {
 int program_already_scheduled(struct queue *q, char *name) {
     struct PCB *p = q->head;
     while (p) {
-        if (strcmp(p->name, name) == 0) return 1;
+        if (strcmp(p->image->name, name) == 0) return 1;
         p = p->next;
     }
     return 0;
@@ -115,7 +115,7 @@ void __debug_with_age(struct queue *q) {
     struct PCB *pcb = q->head;
     printf("q");
     while (pcb) {
-        printf(" -> %ld %s", pcb->duration, pcb->name);
+        printf(" -> %ld %s", pcb->duration, pcb->image->name);
         pcb = pcb->next;
     }
     printf("\n");
@@ -139,4 +139,15 @@ struct PCB *dequeue_aging(struct queue *q) {
 bool is_queue_empty(struct queue *q) {
     if (q == NULL) return true;
     return q->head == NULL;
+}
+
+struct PCB *find_pcb_by_name(struct queue *q, const char *name) {
+    struct PCB *p = q->head;
+    while (p) {
+        if (strcmp(p->image->name, name) == 0) {
+            return p;
+        }
+        p = p->next;
+    }
+    return NULL;
 }
