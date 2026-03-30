@@ -2,15 +2,25 @@
 #include <stddef.h>
 #include <stdio.h> 
 
+#define PAGE_SIZE 3
+#define MAX_PAGES 1000
+#define INVALID_FRAME ((size_t)-1)
+
 typedef size_t pid;
 
 struct PCB {
     pid pid;
     char *name;
-    size_t line_base;
+
+    size_t pc; //logical instruction index
     size_t line_count;
+    size_t line_base;
+
+    int page_table[MAX_PAGES]; // page -> frame
+    size_t num_pages;
+
     size_t duration;
-    size_t pc;
+
     struct PCB *next;
 };
 

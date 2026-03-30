@@ -540,10 +540,6 @@ int my_exec(char *args[], int args_size, bool MT) {
 
 
     for (int n = 0; n < args_size; ++n) {
-        if (program_already_scheduled(q, args[n])) {
-            printf("Bad command: script named %s already scheduled\n", args[n]);
-            goto cleanup;
-        }
         struct PCB *pcb = create_process(args[n]);
         if (!pcb) {
             printf("Failed to create process\n");

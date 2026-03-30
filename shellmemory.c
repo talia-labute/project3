@@ -3,11 +3,14 @@
 #include <stdio.h>
 #include <assert.h>
 #include "shellmemory.h"
+#include "shell.h"
 
 
 #define true 1
 #define false 0
+#define PAGE_SIZE 3
 
+static size_t next_free_line = 0;
 
 // Helper functions
 int match(char *model, char *var) {
@@ -22,7 +25,16 @@ int match(char *model, char *var) {
         return 0;
 }
 
-
+int allocate_frame(char page_buffer[PAGE_SIZE][MAX_USER_INPUT]) {
+    if (next_free_line + PAGE_SIZE > MEM_SIZE) {
+        return -1;
+    }
+    int frame_number = next_free_line / PAGE_SIZE;  
+    for (size_t i = 0; i < PAGE_SIZE; ++i) {
+        allocate_line(page_buffer[i]);
+    }
+    return frame_number;
+}
 
 // for exec memory
 
@@ -32,7 +44,6 @@ struct program_line {
 };
 
 struct program_line linememory[MEM_SIZE];
-size_t next_free_line = 0;
 
 void reset_linememory_allocator() {
     next_free_line = 0;
@@ -54,7 +65,7 @@ void init_linemem() {
 }
 
 size_t allocate_line(const char *line) {
-    if (next_free_line >= MEM_SIZE) {
+    if (next_free_line > MEM_SIZE) {
         // out of memory!
         return (size_t)(-1);
     }
