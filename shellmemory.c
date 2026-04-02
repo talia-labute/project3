@@ -2,143 +2,183 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <time.h>
 #include "shellmemory.h"
-#include "shell.h"
 
+/* ---- Frame store ---- */
+static char *framestore[FRAME_STORE_SIZE];
+static int   frame_allocated[NUM_FRAMES];
+static int   num_allocated_frames = 0;
 
-#define true 1
-#define false 0
-#define PAGE_SIZE 3
+struct frame_owner {
+    int *page_table;
+    int  page_index;
+};
+static struct frame_owner inv_table[NUM_FRAMES];
 
-static size_t next_free_line = 0;
+size_t frame_line_index(int frame, int offset) {
+    return (size_t)(frame * PAGE_SIZE + offset);
+}
 
-// Helper functions
-int match(char *model, char *var) {
-    int i, len = strlen(var), matchCount = 0;
-    for (i = 0; i < len; i++) {
-        if (model[i] == var[i])
-            matchCount++;
+void frame_set_owner(int frame, int *page_table, int page_index) {
+    inv_table[frame].page_table = page_table;
+    inv_table[frame].page_index = page_index;
+}
+
+void frame_clear_owner(int frame) {
+    inv_table[frame].page_table = NULL;
+    inv_table[frame].page_index = -1;
+}
+
+void frame_get_owner(int frame, int **page_table_out, int *page_index_out) {
+    *page_table_out = inv_table[frame].page_table;
+    *page_index_out = inv_table[frame].page_index;
+}
+
+static void write_page_to_frame(int frame, char page_buffer[PAGE_SIZE][MAX_USER_INPUT]) {
+    for (int i = 0; i < PAGE_SIZE; ++i) {
+        size_t idx = frame_line_index(frame, i);
+        free(framestore[idx]);
+        framestore[idx] = strdup(page_buffer[i]);
     }
-    if (matchCount == len) {
-        return 1;
-    } else
-        return 0;
+}
+
+static int find_free_frame(void) {
+    for (int f = 0; f < NUM_FRAMES; ++f)
+        if (!frame_allocated[f]) return f;
+    return -1;
+}
+
+int framestore_is_full(void) {
+    return num_allocated_frames >= NUM_FRAMES;
+}
+
+void print_frame_contents(int frame) {
+    for (int i = 0; i < PAGE_SIZE; ++i) {
+        size_t idx = frame_line_index(frame, i);
+        if (framestore[idx] && framestore[idx][0] != '\0') {
+            printf("%s", framestore[idx]);
+            size_t len = strlen(framestore[idx]);
+            if (len == 0 || framestore[idx][len-1] != '\n') printf("\n");
+        }
+    }
+}
+
+/* Pick a random allocated frame to evict, preferring frames
+   not belonging to the requesting process */
+static int pick_victim(int *requesting_page_table) {
+    int r = rand() % NUM_FRAMES;
+    /* prefer a frame from a different process */
+    for (int i = 0; i < NUM_FRAMES; ++i) {
+        int f = (r + i) % NUM_FRAMES;
+        if (frame_allocated[f] && inv_table[f].page_table != requesting_page_table)
+            return f;
+    }
+    /* fallback: any allocated frame */
+    for (int i = 0; i < NUM_FRAMES; ++i) {
+        int f = (r + i) % NUM_FRAMES;
+        if (frame_allocated[f]) return f;
+    }
+    return r;
 }
 
 int allocate_frame(char page_buffer[PAGE_SIZE][MAX_USER_INPUT]) {
-    if (next_free_line + PAGE_SIZE > MEM_SIZE) {
-        return -1;
-    }
-    int frame_number = next_free_line / PAGE_SIZE;  
-    for (size_t i = 0; i < PAGE_SIZE; ++i) {
-        allocate_line(page_buffer[i]);
-    }
-    return frame_number;
+    int frame = find_free_frame();
+    if (frame < 0) return -1;
+    frame_allocated[frame] = 1;
+    num_allocated_frames++;
+    write_page_to_frame(frame, page_buffer);
+    frame_clear_owner(frame);
+    return frame;
 }
 
-// for exec memory
-
-struct program_line {
-    int allocated; // for sanity-checking
-    char *line;
-};
-
-struct program_line linememory[MEM_SIZE];
-
-void reset_linememory_allocator() {
-    next_free_line = 0;
-    assert_linememory_is_empty();
-}
-
-void assert_linememory_is_empty() {
-    for (size_t i = 0; i < MEM_SIZE; ++i) {
-        assert(!linememory[i].allocated);
-        assert(linememory[i].line == NULL);
+int demand_load_page(char page_buffer[PAGE_SIZE][MAX_USER_INPUT],
+                     int *requesting_page_table) {
+    int frame;
+    if (!framestore_is_full()) {
+        printf("Page fault!\n");
+        frame = find_free_frame();
+        frame_allocated[frame] = 1;
+        num_allocated_frames++;
+        write_page_to_frame(frame, page_buffer);
+    } else {
+        frame = pick_victim(requesting_page_table);
+        printf("Page fault!\n");
+        printf("Victim page contents:\n");
+        print_frame_contents(frame);
+        printf("End of victim page contents.\n");
+        /* invalidate the victim's page table entry */
+        int *vpt; int vpi;
+        frame_get_owner(frame, &vpt, &vpi);
+        if (vpt && vpi >= 0) vpt[vpi] = INVALID_FRAME;
+        write_page_to_frame(frame, page_buffer);
     }
-}
-
-void init_linemem() {
-    for (size_t i = 0; i < MEM_SIZE; ++i) {
-        linememory[i].allocated = false;
-        linememory[i].line = NULL;
-    }
-}
-
-size_t allocate_line(const char *line) {
-    if (next_free_line >= MEM_SIZE) {
-        // out of memory!
-        return (size_t)(-1);
-    }
-    size_t index = next_free_line++;
-    assert(!linememory[index].allocated);
-
-    linememory[index].allocated = true;
-    linememory[index].line = strdup(line);
-    return index;
-}
-
-void free_line(size_t index) {
-    free(linememory[index].line);
-    linememory[index].allocated = false;
-    linememory[index].line = NULL;
+    return frame;
 }
 
 const char *get_line(size_t index) {
-    assert(linememory[index].allocated);
-    return linememory[index].line;
+    assert(index < (size_t)FRAME_STORE_SIZE);
+    assert(framestore[index] != NULL);
+    return framestore[index];
 }
 
+void free_line(size_t index) {
+    free(framestore[index]);
+    framestore[index] = NULL;
+}
 
-// Shell memory functions
+void reset_linememory_allocator(void) {
+    for (int i = 0; i < FRAME_STORE_SIZE; ++i) {
+        free(framestore[i]);
+        framestore[i] = NULL;
+    }
+    for (int f = 0; f < NUM_FRAMES; ++f) {
+        frame_allocated[f] = 0;
+        frame_clear_owner(f);
+    }
+    num_allocated_frames = 0;
+}
 
-struct memory_struct { // block or line
-    char *var;
-    char *value;
-};
+void assert_linememory_is_empty(void) { /* no-op per spec */ }
 
-struct memory_struct shellmemory[MEM_SIZE];
+/* ---- Variable store ---- */
+struct memory_struct { char *var; char *value; };
+static struct memory_struct shellmemory[VAR_MEM_SIZE];
 
-
-
-void mem_init() {
-    int i;
-    for (i = 0; i < MEM_SIZE; i++) {
-        shellmemory[i].var = "none";
+void mem_init(void) {
+    srand((unsigned)time(NULL));
+    for (int i = 0; i < VAR_MEM_SIZE; i++) {
+        shellmemory[i].var   = "none";
         shellmemory[i].value = "none";
     }
+    for (int i = 0; i < FRAME_STORE_SIZE; ++i) framestore[i] = NULL;
+    for (int f = 0; f < NUM_FRAMES; ++f) {
+        frame_allocated[f] = 0;
+        frame_clear_owner(f);
+    }
 }
 
-// Set key value pair
 void mem_set_value(char *var_in, char *value_in) {
-    int i;
-
-    for (i = 0; i < MEM_SIZE; i++) {
+    for (int i = 0; i < VAR_MEM_SIZE; i++) {
         if (strcmp(shellmemory[i].var, var_in) == 0) {
+            free(shellmemory[i].value);
             shellmemory[i].value = strdup(value_in);
             return;
         }
     }
-
-    //Value does not exist, need to find a free spot.
-    for (i = 0; i < MEM_SIZE; i++) {
+    for (int i = 0; i < VAR_MEM_SIZE; i++) {
         if (strcmp(shellmemory[i].var, "none") == 0) {
-            shellmemory[i].var = strdup(var_in);
+            shellmemory[i].var   = strdup(var_in);
             shellmemory[i].value = strdup(value_in);
             return;
         }
     }
-
-    return;
 }
 
-//get value based on input key
 char *mem_get_value(char *var_in) {
-    int i;
-
-    for (i = 0; i < MEM_SIZE; i++) {
-        if (strcmp(shellmemory[i].var, var_in) == 0) {
+    for (int i = 0; i < VAR_MEM_SIZE; i++) {
+        if (strcmp(shellmemory[i].var, var_in) == 0)
             return strdup(shellmemory[i].value);
-        }
     }
     return NULL;
 }

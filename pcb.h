@@ -14,6 +14,9 @@ struct ProgramImage {
     size_t num_pages;
     int page_table[MAX_PAGES]; // page -> frame
     int ref_count;
+
+    FILE  *backing_file;   
+    size_t pages_loaded;   /* # pages currently in the frame store */
 };
 
 struct PCB {
@@ -35,4 +38,6 @@ struct PCB *create_process(const char *filename);
 struct PCB *create_process_from_FILE(FILE *f, const char *name);
 struct PCB *create_process_from_image(struct ProgramImage *image);
 void free_pcb(struct PCB *pcb);
+int pcb_current_page_is_loaded(struct PCB *pcb);
+int pcb_load_next_page(struct PCB *pcb);
 

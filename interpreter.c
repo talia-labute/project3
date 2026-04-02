@@ -431,6 +431,9 @@ void runSchedule(struct queue *q, const struct schedule_policy *policy) {
 // see doc in header file
 struct PCB *run_pcb_to_completion(struct PCB *pcb) {
     while (pcb_has_next_instruction(pcb)) {
+        if (!pcb_current_page_is_loaded(pcb)) {
+            pcb_load_next_page(pcb);
+        }
         size_t instr = pcb_next_instruction(pcb);
         parseInput(get_line(instr));
     }
@@ -440,15 +443,15 @@ struct PCB *run_pcb_to_completion(struct PCB *pcb) {
 
 // see doc in header file
 struct PCB *run_pcb_for_n_steps(struct PCB *pcb, size_t n) {
-    debug("run n steps: n is %ld\n", n);
     for (; n && pcb_has_next_instruction(pcb); --n) {
+        /* Check for page fault before fetching the instruction */
+        if (!pcb_current_page_is_loaded(pcb)) {
+            pcb_load_next_page(pcb);
+            /* interrupt: put process back in queue immediately */
+            return pcb;
+        }
         parseInput(get_line(pcb_next_instruction(pcb)));
     }
-    debug("run n steps: looped to %ld\n", n);
-    // The loop runs until either we've done n steps or the pcb is out of
-    // instructions,  whichever happens first. But they might also happen
-    // at the same time, in which case we should still clean up.
-    // So check if there are more instructions, not the value of n.
     if (pcb_has_next_instruction(pcb)) {
         return pcb;
     } else {
