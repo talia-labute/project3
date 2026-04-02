@@ -445,11 +445,11 @@ struct PCB *run_pcb_to_completion(struct PCB *pcb) {
 struct PCB *run_pcb_for_n_steps(struct PCB *pcb, size_t n) {
     debug("run n steps: n is %ld\n", n);
     for (; n && pcb_has_next_instruction(pcb); --n) {
-        /* page fault check before executing */
+        /* Check for page fault before executing the next instruction. */
         if (!pcb_current_page_is_loaded(pcb)) {
-            /* interrupt: place process back on queue (caller handles re-enqueue) */
+            /* Load the missing page, then return to scheduler so this
+               process goes to the back of the ready queue per spec. */
             pcb_load_next_page(pcb);
-            /* Return as if still runnable — the scheduler will re-enqueue */
             return pcb;
         }
         parseInput(get_line(pcb_next_instruction(pcb)));
@@ -536,7 +536,7 @@ int my_exec(char *args[], int args_size, bool MT) {
     }
 
     if (!background_exec) {
-        // normal exec — start fresh frame store
+        // normal exec — reset frame store for fresh run
         reset_linememory_allocator();
         assert(!q);
         q = alloc_queue();
@@ -544,53 +544,21 @@ int my_exec(char *args[], int args_size, bool MT) {
         assert(q);
     }
 
-    /* Track names loaded this exec invocation so duplicates share pages. */
-    char *loaded_names[4] = {NULL, NULL, NULL, NULL};
-    struct PCB *loaded_pcbs[4] = {NULL, NULL, NULL, NULL};
-    int num_loaded = 0;
 
     for (int n = 0; n < args_size; ++n) {
         struct PCB *pcb = NULL;
 
-        /* Check if we already loaded this filename in this exec call */
-        for (int k = 0; k < num_loaded; ++k) {
-            if (strcmp(loaded_names[k], args[n]) == 0) {
-                /* Re-use the loaded PCB's page table by creating a new PCB
-                   that shares the same pages (already in frame store). */
-                struct PCB *src = loaded_pcbs[k];
-                pcb = malloc(sizeof(struct PCB));
-                static pid share_pid = 5000;
-                pcb->pid          = share_pid++;
-                pcb->name         = strdup(src->name);
-                pcb->next         = NULL;
-                pcb->pc           = 0;
-                pcb->line_count   = src->line_count;
-                pcb->num_pages    = src->num_pages;
-                pcb->pages_loaded = src->pages_loaded;
-                pcb->duration     = src->duration;
-                /* Share the same backing file by reopening */
-                pcb->backing_file = fopen(src->name, "r");
-                for (int i = 0; i < MAX_PAGES; ++i)
-                    pcb->page_table[i] = src->page_table[i];
-                /* Seek past already-loaded pages */
-                for (size_t s = 0; s < src->pages_loaded; ++s) {
-                    char tmp[MAX_USER_INPUT];
-                    for (int ln = 0; ln < PAGE_SIZE; ++ln)
-                        fgets(tmp, MAX_USER_INPUT, pcb->backing_file);
-                }
-                break;
-            }
+        struct PCB *existing = find_pcb_by_name(q, args[n]);
+
+        if (existing) {
+            pcb = create_process_from_image(existing->image);
+        } else {
+            pcb = create_process(args[n]);
         }
 
         if (!pcb) {
-            pcb = create_process(args[n]);
-            if (!pcb) {
-                printf("Failed to create process\n");
-                goto cleanup;
-            }
-            loaded_names[num_loaded] = args[n];
-            loaded_pcbs[num_loaded]  = pcb;
-            num_loaded++;
+            printf("Failed to create process\n");
+            goto cleanup;
         }
 
         if (threads_created) {
@@ -604,7 +572,7 @@ int my_exec(char *args[], int args_size, bool MT) {
     }
 
     if (background && !background_exec) {
-        struct PCB *pcb = create_process_from_FILE(stdin); // cheat to read until EOF char
+        struct PCB *pcb = create_process_from_FILE(stdin, "__stdin__"); // cheat to read until EOF char
         if (!pcb) {
             printf("Failed to create STDIN process\n");
             goto cleanup;

@@ -1,132 +1,116 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "shell.h"        /* MAX_USER_INPUT */
+#include "shell.h"
 #include "shellmemory.h"
 #include "pcb.h"
 
 /* ------------------------------------------------------------------ */
-/*  Low-level helpers                                                  */
+/*  Instruction helpers                                                */
 /* ------------------------------------------------------------------ */
 
 int pcb_has_next_instruction(struct PCB *pcb) {
-    return pcb->pc < pcb->line_count;
-}
-
-/* The page that contains logical instruction index pc. */
-static int logical_page(struct PCB *pcb) {
-    return (int)(pcb->pc / PAGE_SIZE);
+    return pcb->pc < pcb->image->line_count;
 }
 
 int pcb_current_page_is_loaded(struct PCB *pcb) {
-    int page = logical_page(pcb);
-    return pcb->page_table[page] != INVALID_FRAME;
+    int page = (int)(pcb->pc / PAGE_SIZE);
+    return pcb->image->page_table[page] != INVALID_FRAME;
 }
 
 size_t pcb_next_instruction(struct PCB *pcb) {
     int page   = (int)(pcb->pc / PAGE_SIZE);
     int offset = (int)(pcb->pc % PAGE_SIZE);
-    int frame  = pcb->page_table[page];
+    int frame  = pcb->image->page_table[page];
     size_t physical = frame_line_index(frame, offset);
     pcb->pc++;
     return physical;
 }
 
 /* ------------------------------------------------------------------ */
-/*  Page loading                                                       */
+/*  Demand paging                                                      */
 /* ------------------------------------------------------------------ */
 
 /*
- * Read one page worth of lines from the backing file into page_buffer.
- * Returns the number of lines actually read (0 means EOF was already here).
+ * Read exactly PAGE_SIZE lines from f into page_buffer.
+ * Returns number of lines actually read (0 = EOF already reached).
  */
 static int read_one_page(FILE *f, char page_buffer[PAGE_SIZE][MAX_USER_INPUT]) {
-    int lines_read = 0;
+    int n = 0;
     for (int i = 0; i < PAGE_SIZE; ++i) {
         if (fgets(page_buffer[i], MAX_USER_INPUT, f)) {
-            lines_read++;
+            n++;
         } else {
-            /* zero-pad remaining slots */
             memset(page_buffer[i], 0, MAX_USER_INPUT);
         }
     }
-    return lines_read;
-}
-
-/*
- * Internal: load next page.
- * If silent=1, no page-fault messages are printed
- * (used during initial process creation).
- * Evicts a random victim (preferring other processes) if frame store is full.
- * Returns the frame number allocated, or -1 on error.
- */
-static int load_next_page_internal(struct PCB *pcb, int silent) {
-    int page_index = (int)pcb->pages_loaded;
-    if (page_index >= (int)pcb->num_pages) return -1;
-
-    char page_buffer[PAGE_SIZE][MAX_USER_INPUT];
-    int lines_read = read_one_page(pcb->backing_file, page_buffer);
-    if (lines_read == 0) return -1;
-
-    int frame;
-    if (!framestore_is_full()) {
-        if (!silent) printf("Page fault!\n");
-        frame = allocate_frame(page_buffer);
-    } else {
-        frame = pick_random_victim_frame_for((void *)pcb);
-
-        if (!silent) {
-            printf("Page fault!\n");
-            printf("Victim page contents:\n");
-            print_frame_contents(frame);
-            printf("End of victim page contents.\n");
-        }
-
-        struct PCB *victim_pcb  = NULL;
-        int         victim_page = -1;
-        frame_get_owner(frame, &victim_pcb, &victim_page);
-        if (victim_pcb && victim_page >= 0) {
-            victim_pcb->page_table[victim_page] = INVALID_FRAME;
-        }
-
-        evict_and_replace_frame(frame, page_buffer);
-    }
-
-    pcb->page_table[page_index] = frame;
-    frame_set_owner(frame, pcb, page_index);
-    pcb->pages_loaded++;
-    return frame;
+    return n;
 }
 
 int pcb_load_next_page(struct PCB *pcb) {
-    return load_next_page_internal(pcb, 0);  /* loud: prints page fault messages */
+    struct ProgramImage *img = pcb->image;
+    int page_index = (int)img->pages_loaded;
+    if (page_index >= (int)img->num_pages) return -1;
+    if (!img->backing_file) return -1;
+
+    char page_buffer[PAGE_SIZE][MAX_USER_INPUT];
+    if (read_one_page(img->backing_file, page_buffer) == 0) return -1;
+
+    /*
+     * Pass the image's page_table pointer as `requesting_pcb` so that
+     * demand_load_page can avoid evicting this image's own frames.
+     * The shellmemory layer compares raw int* pointers in the inverse table.
+     */
+    int frame = demand_load_page(page_buffer, (void *)img->page_table);
+
+    img->page_table[page_index] = frame;
+    /* Register ownership. If ref_count==1 this PCB is the sole user;
+       pass &pcb->pc so pick_victim can detect cold pages. */
+    if (img->ref_count == 1) {
+        frame_set_owner_with_pc(frame, img->page_table, page_index, &pcb->pc);
+    } else {
+        frame_set_owner(frame, img->page_table, page_index);
+    }
+    img->pages_loaded++;
+    return frame;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Image creation helpers                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Count lines and total pages in f, then rewind.
+ */
+static void count_lines_and_pages(FILE *f,
+                                   size_t *line_count_out,
+                                   size_t *num_pages_out) {
+    char buf[MAX_USER_INPUT];
+    size_t lc = 0;
+    while (fgets(buf, MAX_USER_INPUT, f)) lc++;
+    *line_count_out = lc;
+    *num_pages_out  = (lc + PAGE_SIZE - 1) / PAGE_SIZE;
+    rewind(f);
+}
+
+/*
+ * Silently load the first `n` pages from img->backing_file.
+ * No page-fault messages; used for initial eager loading.
+ */
+static void load_initial_pages(struct ProgramImage *img, int n) {
+    char page_buffer[PAGE_SIZE][MAX_USER_INPUT];
+    for (int p = 0; p < n && (size_t)p < img->num_pages; ++p) {
+        if (read_one_page(img->backing_file, page_buffer) == 0) break;
+        int frame = allocate_frame(page_buffer);
+        img->page_table[p] = frame;
+        frame_set_owner(frame, img->page_table, p);
+        img->pages_loaded++;
+    }
 }
 
 /* ------------------------------------------------------------------ */
 /*  Process creation                                                   */
 /* ------------------------------------------------------------------ */
-
-/*
- * Count lines and pages without keeping the file data.
- * Rewinds the file afterwards.
- */
-static void count_lines_and_pages(FILE *f, size_t *line_count, size_t *num_pages) {
-    char buf[MAX_USER_INPUT];
-    *line_count = 0;
-    while (fgets(buf, MAX_USER_INPUT, f)) (*line_count)++;
-    *num_pages = (*line_count + PAGE_SIZE - 1) / PAGE_SIZE;
-    rewind(f);
-}
-
-/*
- * Load the first N pages of pcb from its backing file.
- * Leaves the file cursor positioned at the start of page N.
- */
-static void load_initial_pages(struct PCB *pcb, int n) {
-    for (int p = 0; p < n && (size_t)p < pcb->num_pages; ++p) {
-        load_next_page_internal(pcb, 1);  /* silent */
-    }
-}
 
 struct PCB *create_process(const char *filename) {
     FILE *f = fopen(filename, "r");
@@ -135,63 +119,56 @@ struct PCB *create_process(const char *filename) {
         return NULL;
     }
 
-    struct PCB *pcb = malloc(sizeof(struct PCB));
-    static pid fresh_pid = 1;
+    struct ProgramImage *img = malloc(sizeof(struct ProgramImage));
+    if (!img) { fclose(f); return NULL; }
 
-    pcb->pid          = fresh_pid++;
-    pcb->name         = strdup(filename);
-    pcb->next         = NULL;
-    pcb->pc           = 0;
-    pcb->pages_loaded = 0;
-    pcb->backing_file = f;
+    img->name         = strdup(filename);
+    img->ref_count    = 0;
+    img->backing_file = f;
+    img->pages_loaded = 0;
 
-    /* Initialise all page table entries to INVALID */
-    for (int i = 0; i < MAX_PAGES; ++i) pcb->page_table[i] = INVALID_FRAME;
+    for (int i = 0; i < MAX_PAGES; ++i) img->page_table[i] = INVALID_FRAME;
 
-    count_lines_and_pages(f, &pcb->line_count, &pcb->num_pages);
-    pcb->duration = pcb->line_count;
+    count_lines_and_pages(f, &img->line_count, &img->num_pages);
 
-    /* Load first 2 pages (or just 1 if program < PAGE_SIZE lines) */
-    int pages_to_load = (pcb->num_pages >= 2) ? 2 : (int)pcb->num_pages;
-    load_initial_pages(pcb, pages_to_load);
+    /* Load first 2 pages eagerly (or just 1 if the script is that short). */
+    int pages_to_load = (img->num_pages >= 2) ? 2 : (int)img->num_pages;
+    load_initial_pages(img, pages_to_load);
 
-    return pcb;
+    return create_process_from_image(img);
 }
 
-/*
- * create_process_from_FILE: used for stdin / background mode.
- * Loads ALL pages eagerly (we can't re-read stdin).
- */
-struct PCB *create_process_from_FILE(FILE *script) {
-    struct PCB *pcb = malloc(sizeof(struct PCB));
-    static pid fresh_pid_f = 10000; /* separate namespace */
+struct PCB *create_process_from_FILE(FILE *script, const char *name) {
+    /*
+     * Used for stdin-sourced processes (background mode).
+     * We cannot seek on stdin, so we load ALL pages eagerly right now.
+     */
+    struct ProgramImage *img = malloc(sizeof(struct ProgramImage));
+    if (!img) return NULL;
 
-    pcb->pid          = fresh_pid_f++;
-    pcb->name         = strdup("");
-    pcb->next         = NULL;
-    pcb->pc           = 0;
-    pcb->line_count   = 0;
-    pcb->num_pages    = 0;
-    pcb->pages_loaded = 0;
-    pcb->backing_file = NULL; /* can't seek on stdin */
+    img->name         = strdup(name);
+    img->ref_count    = 0;
+    img->backing_file = NULL; /* stdin can't be re-read */
+    img->line_count   = 0;
+    img->num_pages    = 0;
+    img->pages_loaded = 0;
 
-    for (int i = 0; i < MAX_PAGES; ++i) pcb->page_table[i] = INVALID_FRAME;
+    for (int i = 0; i < MAX_PAGES; ++i) img->page_table[i] = INVALID_FRAME;
 
     char linebuf[MAX_USER_INPUT];
     char page_buffer[PAGE_SIZE][MAX_USER_INPUT];
-    int line_in_page = 0;
+    int  line_in_page = 0;
 
     while (fgets(linebuf, MAX_USER_INPUT, script)) {
-        strcpy(page_buffer[line_in_page], linebuf);
-        line_in_page++;
-        pcb->line_count++;
+        strcpy(page_buffer[line_in_page++], linebuf);
+        img->line_count++;
 
         if (line_in_page == PAGE_SIZE) {
             int frame = allocate_frame(page_buffer);
-            pcb->page_table[pcb->num_pages] = frame;
-            frame_set_owner(frame, pcb, (int)pcb->num_pages);
-            pcb->num_pages++;
-            pcb->pages_loaded++;
+            img->page_table[img->num_pages] = frame;
+            frame_set_owner(frame, img->page_table, (int)img->num_pages);
+            img->num_pages++;
+            img->pages_loaded++;
             line_in_page = 0;
         }
     }
@@ -200,25 +177,72 @@ struct PCB *create_process_from_FILE(FILE *script) {
         for (int i = line_in_page; i < PAGE_SIZE; i++)
             memset(page_buffer[i], 0, MAX_USER_INPUT);
         int frame = allocate_frame(page_buffer);
-        pcb->page_table[pcb->num_pages] = frame;
-        frame_set_owner(frame, pcb, (int)pcb->num_pages);
-        pcb->num_pages++;
-        pcb->pages_loaded++;
+        img->page_table[img->num_pages] = frame;
+        frame_set_owner(frame, img->page_table, (int)img->num_pages);
+        img->num_pages++;
+        img->pages_loaded++;
     }
 
-    pcb->duration = pcb->line_count;
+    fclose(script);
+    return create_process_from_image(img);
+}
+
+struct PCB *create_process_from_image(struct ProgramImage *image) {
+    static pid fresh_pid = 1;
+
+    struct PCB *pcb = malloc(sizeof(struct PCB));
+    if (!pcb) return NULL;
+
+    pcb->pid      = fresh_pid++;
+    pcb->pc       = 0;
+    pcb->duration = image->line_count;
+    pcb->image    = image;
+    pcb->next     = NULL;
+
+    image->ref_count++;
+
+    /* If this is the only PCB using this image, register pc_ptr so the
+       eviction logic can detect cold (already-executed) pages. */
+    if (image->ref_count == 1) {
+        for (int p = 0; p < (int)image->pages_loaded; ++p) {
+            int frame = image->page_table[p];
+            if (frame != INVALID_FRAME) {
+                frame_set_owner_with_pc(frame, image->page_table, p, &pcb->pc);
+            }
+        }
+    } else {
+        /* Shared image — clear pc_ptr so we don't use a stale pointer. */
+        for (int p = 0; p < (int)image->pages_loaded; ++p) {
+            int frame = image->page_table[p];
+            if (frame != INVALID_FRAME) {
+                frame_set_owner(frame, image->page_table, p);
+            }
+        }
+    }
+
     return pcb;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Cleanup                                                            */
+/* ------------------------------------------------------------------ */
+
 void free_pcb(struct PCB *pcb) {
-    /* Per assignment spec: do NOT evict pages when a process terminates.
-       Just close the backing file and free the PCB struct. */
-    if (pcb->backing_file) {
-        fclose(pcb->backing_file);
-        pcb->backing_file = NULL;
+    struct ProgramImage *img = pcb->image;
+    img->ref_count--;
+
+    if (img->ref_count == 0) {
+        /*
+         * Per assignment spec: do NOT evict pages when a process terminates.
+         * Just close the backing file and free the image struct.
+         */
+        if (img->backing_file) {
+            fclose(img->backing_file);
+            img->backing_file = NULL;
+        }
+        free(img->name);
+        free(img);
     }
-    if (pcb->name && strcmp(pcb->name, "") != 0) {
-        free(pcb->name);
-    }
+
     free(pcb);
 }

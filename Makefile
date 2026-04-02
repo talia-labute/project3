@@ -1,17 +1,16 @@
 CC=gcc
+#CFLAGS=-g -O0 -Wall #-DNDEBUG
 CFLAGS=-DNDEBUG -Wall
 
-# Default values if not provided on command line
-framesize ?= 18
+# Compile-time memory sizes: make mysh framesize=X varmemsize=Y
+framesize  ?= 18
 varmemsize ?= 10
 
-DFLAGS=-DFRAME_STORE_SIZE=$(framesize) -DVAR_MEM_SIZE=$(varmemsize)
-SRCS=shell.c interpreter.c shellmemory.c pcb.c queue.c schedule_policy.c
-OBJS=shell.o interpreter.o shellmemory.o pcb.o queue.o schedule_policy.o
-
-mysh: $(SRCS)
-	$(CC) $(CFLAGS) $(DFLAGS) -c $(SRCS)
-	$(CC) $(CFLAGS) $(DFLAGS) -o mysh $(OBJS) -lpthread
+mysh: shell.c interpreter.c shellmemory.c pcb.c queue.c schedule_policy.c
+	$(CC) $(CFLAGS) -DFRAME_STORE_SIZE=$(framesize) -DVAR_MEM_SIZE=$(varmemsize) \
+		-c shell.c interpreter.c shellmemory.c pcb.c queue.c schedule_policy.c
+	$(CC) $(CFLAGS) -DFRAME_STORE_SIZE=$(framesize) -DVAR_MEM_SIZE=$(varmemsize) \
+		-o mysh shell.o interpreter.o shellmemory.o pcb.o queue.o schedule_policy.o -lpthread
 
 clean:
 	rm -f mysh *.o
