@@ -5,6 +5,12 @@
 #include "shellmemory.h"
 #include "pcb.h"
 
+static int next_exec_order;
+
+void pcb_reset_exec_order(void) {
+    next_exec_order = 0;
+}
+
 int pcb_has_next_instruction(struct PCB *pcb) {
     return pcb->pc < pcb->image->line_count;
 }
@@ -35,19 +41,29 @@ static int read_one_page(FILE *f, char page_buffer[PAGE_SIZE][MAX_USER_INPUT]) {
     return n;
 }
 
+static void seek_to_page(FILE *f, int page_index) {
+    rewind(f);
+    char buf[MAX_USER_INPUT];
+    size_t skip = (size_t)page_index * (size_t)PAGE_SIZE;
+    for (size_t i = 0; i < skip; ++i) {
+        if (!fgets(buf, MAX_USER_INPUT, f)) return;
+    }
+}
+
 int pcb_load_next_page(struct PCB *pcb) {
     struct ProgramImage *img = pcb->image;
-    int page_index = (int)img->pages_loaded;
-    if (page_index >= (int)img->num_pages) return -1;
+    int page_index = (int)(pcb->pc / PAGE_SIZE);
+    if (page_index < 0 || page_index >= (int)img->num_pages) return -1;
     if (!img->backing_file) return -1;
+    if (img->page_table[page_index] != INVALID_FRAME) return img->page_table[page_index];
 
     char page_buffer[PAGE_SIZE][MAX_USER_INPUT];
+    seek_to_page(img->backing_file, page_index);
     if (read_one_page(img->backing_file, page_buffer) == 0) return -1;
 
     int frame = demand_load_page(page_buffer, img->page_table);
     img->page_table[page_index] = frame;
-    frame_set_owner(frame, img->page_table, page_index);
-    img->pages_loaded++;
+    frame_set_owner(frame, img->page_table, page_index, img->exec_order);
     return frame;
 }
 
@@ -63,9 +79,15 @@ static void load_initial_pages(struct ProgramImage *img, int n) {
     char page_buffer[PAGE_SIZE][MAX_USER_INPUT];
     for (int p = 0; p < n && (size_t)p < img->num_pages; ++p) {
         if (read_one_page(img->backing_file, page_buffer) == 0) break;
-        int frame = allocate_frame(page_buffer);
+        int frame;
+        if (!framestore_is_full()) {
+            frame = allocate_frame(page_buffer);
+        } else {
+            frame = demand_load_page(page_buffer, img->page_table);
+        }
+        if (frame < 0) break;
         img->page_table[p] = frame;
-        frame_set_owner(frame, img->page_table, p);
+        frame_set_owner(frame, img->page_table, p, img->exec_order);
         img->pages_loaded++;
     }
 }
@@ -92,6 +114,7 @@ struct PCB *create_process(const char *filename) {
 
     img->name         = strdup(filename);
     img->ref_count    = 0;
+    img->exec_order   = next_exec_order++;
     img->backing_file = f;
     img->pages_loaded = 0;
     for (int i = 0; i < MAX_PAGES; ++i) img->page_table[i] = INVALID_FRAME;
@@ -112,6 +135,7 @@ struct PCB *create_process_from_FILE(FILE *script, const char *name) {
 
     img->name         = strdup(name);
     img->ref_count    = 0;
+    img->exec_order   = next_exec_order++;
     img->backing_file = NULL;
     img->line_count   = 0;
     img->num_pages    = 0;
@@ -128,7 +152,7 @@ struct PCB *create_process_from_FILE(FILE *script, const char *name) {
         if (line_in_page == PAGE_SIZE) {
             int frame = allocate_frame(page_buffer);
             img->page_table[img->num_pages] = frame;
-            frame_set_owner(frame, img->page_table, (int)img->num_pages);
+            frame_set_owner(frame, img->page_table, (int)img->num_pages, img->exec_order);
             img->num_pages++;
             img->pages_loaded++;
             line_in_page = 0;
@@ -139,7 +163,7 @@ struct PCB *create_process_from_FILE(FILE *script, const char *name) {
             memset(page_buffer[i], 0, MAX_USER_INPUT);
         int frame = allocate_frame(page_buffer);
         img->page_table[img->num_pages] = frame;
-        frame_set_owner(frame, img->page_table, (int)img->num_pages);
+        frame_set_owner(frame, img->page_table, (int)img->num_pages, img->exec_order);
         img->num_pages++;
         img->pages_loaded++;
     }

@@ -535,6 +535,7 @@ int my_exec(char *args[], int args_size, bool MT) {
     if (!background_exec) {
         // normal exec
         reset_linememory_allocator();
+        pcb_reset_exec_order();
         assert(!q);
         q = alloc_queue();
     } else {

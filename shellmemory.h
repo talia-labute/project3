@@ -26,9 +26,9 @@ void print_frame_contents(int frame);
 size_t frame_line_index(int frame, int offset);
 
 /* Inverse page table */
-void frame_set_owner(int frame, int *page_table, int page_index);
+void frame_set_owner(int frame, int *page_table, int page_index, int exec_order);
 void frame_clear_owner(int frame);
-void frame_get_owner(int frame, int **page_table_out, int *page_index_out);
+void frame_get_owner(int frame, int **page_table_out, int *page_index_out, int *exec_order_out);
 
 /* Line access */
 const char *get_line(size_t index);
